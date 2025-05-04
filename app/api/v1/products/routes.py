@@ -12,7 +12,7 @@ import json
 from fastapi.encoders import jsonable_encoder
 router = APIRouter(tags=["products"], prefix="/products")
 from fastapi.responses import ORJSONResponse
-from app.libs.chromadb import add_image,search_image
+from app.libs.chromadb import add_image,search_image, embedding_function
 import numpy as np
 from PIL import Image
 import io
@@ -40,9 +40,9 @@ async def create_product(
         )
     
     # Check if category exists
-    category = await db.categories.find_one({"_id": str(product_data.category_id)})
+    category = await db.categories.find_one({"_id": ObjectId(product_data.category_id)})
     if not category:
-        raise HTTPException(
+        raise HTTPException(    
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Category not found"
         )
@@ -238,29 +238,39 @@ async def get_merchant_inventory(
         product["merchant_id"] = str(product["merchant_id"])
     return products
 
-
-
 @router.post("/search/image")
 async def get_search_by_image(image: UploadFile):
-  
-
     # Read the image file
     image_data = await image.read()
-    
-    # Convert the image data to a PIL Image
     pil_image = Image.open(io.BytesIO(image_data))
-    
-    # Convert the PIL Image to a numpy array
-    numpy_array = np.array(pil_image)
+    image_np = np.array(pil_image)
 
-    ids =  search_image(numpy_array)
+    # 1. Compute image embedding
+    image_emb = embedding_function([image_np] )[0]
 
-    print(f"IDS are {ids}")
-    # products = await db.products.find({"_id":{"$in":ids}},).to_list(1000)
-    products = [await db.products.find_one({"_id":ObjectId(_id)}) for _id in ids]
-       
+    # 2. Fetch all categories and compute their text embeddings
+    categories = await db.categories.find({"is_active": True}).to_list(1000)
+    category_texts = [cat["name"] for cat in categories]
+    category_ids = [str(cat["_id"]) for cat in categories]
+    cat_embs = embedding_function(category_texts)
 
+    # 3. Find closest category (cosine similarity)
+    def cosine_sim(a, b):
+        a = np.array(a)
+        b = np.array(b)
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    sims = [cosine_sim(image_emb, cat_emb) for cat_emb in cat_embs]
+    print("Sims",sims)
+    best_idx = int(np.argmax(sims))
+    best_category_id = category_ids[best_idx]
+
+    # 4. Return all products in that category
+    products = await db.products.find({"category_id": str(best_category_id), "is_active": True}).to_list(1000)
     for product in products:
-        product["_id"] = str(product["_id"])
-        product["merchant_id"] = str(product["merchant_id"])
-    return products
+        if "_id" in product:
+            product["_id"] = str(product["_id"])
+        if "category_id" in product:
+            product["category_id"] = str(product["category_id"])
+        if "merchant_id" in product:
+            product["merchant_id"] = str(product["merchant_id"])
+    return {"category_id": best_category_id, "products": products}

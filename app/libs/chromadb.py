@@ -18,6 +18,9 @@ def fetchImage(url):
 def add_image(id,url,metadata):
   collection.add(ids=[id],images=[numpy.array(Image.open(fetchImage(url)))],metadatas=[metadata])
 
+
+
+
 def search_image(image,n_results=100):
   result =  collection.query(query_images=[image],n_results=n_results)
   print(result)

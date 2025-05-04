@@ -1,6 +1,5 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
-from bson import ObjectId
 from datetime import datetime
 
 from app.core.security import get_current_user
@@ -10,7 +9,17 @@ from app.schemas.merchant import Merchant, MerchantCreate, MerchantUpdate
 
 router = APIRouter(tags=["merchants"], prefix="/merchants")
 
-@router.post("", response_model=Merchant)
+def to_str_id(merchant):
+    if merchant is None:
+        return None
+    merchant = dict(merchant)
+    if "_id" in merchant:
+        merchant["_id"] = str(merchant["_id"])
+    if "user_id" in merchant:
+        merchant["user_id"] = str(merchant["user_id"])
+    return merchant
+
+@router.post("")
 async def create_merchant(
     merchant_data: MerchantCreate, 
     current_user = Depends(get_current_user)
@@ -37,9 +46,9 @@ async def create_merchant(
     )
     
     created_merchant = await db.merchants.find_one({"_id": result.inserted_id})
-    return created_merchant
+    return to_str_id(created_merchant)
 
-@router.get("/me", response_model=Merchant)
+@router.get("/me")
 async def get_merchant_profile(current_user = Depends(get_current_user)):
     if current_user["role"] != UserRole.MERCHANT:
         raise HTTPException(
@@ -51,9 +60,9 @@ async def get_merchant_profile(current_user = Depends(get_current_user)):
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant profile not found")
     
-    return merchant
+    return to_str_id(merchant)
 
-@router.put("/me", response_model=Merchant)
+@router.put("/me")
 async def update_merchant_profile(
     merchant_update: MerchantUpdate,
     current_user = Depends(get_current_user)
@@ -77,16 +86,36 @@ async def update_merchant_profile(
         )
     
     updated_merchant = await db.merchants.find_one({"_id": merchant["_id"]})
-    return updated_merchant
+    return to_str_id(updated_merchant)
 
-@router.get("", response_model=List[Merchant])
+@router.get("")
 async def list_merchants():
-    merchants = await db.merchants.find({"is_verified": True}).to_list(1000)
-    return merchants
+    merchants = await db.merchants.find({}).to_list(1000)
+    return [to_str_id(m) for m in merchants]
 
-@router.get("/{merchant_id}", response_model=Merchant)
+@router.get("/{merchant_id}")
 async def get_merchant(merchant_id: str):
-    merchant = await db.merchants.find_one({"_id": ObjectId(merchant_id)})
+    merchant = await db.merchants.find_one({"_id": str(merchant_id)})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
-    return merchant
+    return to_str_id(merchant)
+
+@router.delete("/{merchant_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_merchant(
+    merchant_id: str,
+    current_user = Depends(get_current_user)
+):
+    # Only admins can delete merchants
+    if current_user["role"] != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions"
+        )
+    merchant = await db.merchants.find_one({"_id": str(merchant_id)})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    await db.merchants.update_one(
+        {"_id": str(merchant_id)},
+        {"$set": {"is_verified": False, "deleted_at": datetime.utcnow()}}
+    )
+    return None

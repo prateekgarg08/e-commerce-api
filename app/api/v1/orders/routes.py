@@ -3,13 +3,12 @@ from typing import List, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from datetime import datetime
-from bson import ObjectId
 
 from app.core.security import get_current_user
 from app.db.database import db
 from app.db.models import UserRole, OrderStatus
 from app.schemas.order import Order, OrderCreate, OrderUpdate
-
+from bson import ObjectId
 router = APIRouter(tags=["orders"], prefix="/orders")
 
 @router.post("")
@@ -46,7 +45,7 @@ async def create_order(
         
         # Add to items list
         items.append({
-            "product_id": str(item.product_id),
+            "product_id": item.product_id,
             "quantity": item.quantity,
             "price": product["price"]
         })
@@ -56,13 +55,13 @@ async def create_order(
         
         # Update product stock
         await db.products.update_one(
-            {"_id": str(item.product_id)},
+            {"_id": item.product_id},
             {"$inc": {"stock_quantity": -item.quantity}}
         )
     
     # Create order
     new_order = {
-        "_id":str(uuid4()),
+        "_id": str(uuid4()),
         "user_id": str(current_user["_id"]),
         "items": items,
         "total_amount": total_amount,
@@ -88,7 +87,7 @@ async def list_orders(
     current_user = Depends(get_current_user)
 ):
     # Build query
-    query = {"user_id": str(current_user["_id"])}
+    query = {}
     
     if status:
         query["status"] = status
@@ -147,22 +146,6 @@ async def update_order(
         raise HTTPException(status_code=404, detail="Order not found")
     
     # Check permissions
-    is_admin = current_user["role"] == UserRole.ADMIN
-    is_order_owner = str(order["user_id"]) == str(current_user["_id"])
-    
-    # Only admins can update status
-    if "status" in order_update.dict(exclude_unset=True) and not is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can update order status"
-        )
-    
-    # Only order owner can update shipping address and contact phone
-    if not is_admin and not is_order_owner:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions"
-        )
     
     # Prepare update data
     update_data = {k: v for k, v in order_update.dict(exclude_unset=True).items()}
@@ -201,9 +184,9 @@ async def get_merchant_orders(
     
     # Get merchant products
     merchant_products = await db.products.find(
-        {"merchant_id": ObjectId(merchant["_id"])}
+        {"merchant_id": merchant["_id"]}
     ).to_list(1000)
-    merchant_product_ids = [p["_id"] for p in merchant_products]
+    merchant_product_ids = [str(p["_id"]) for p in merchant_products]
     
     # Build query for orders that contain merchant products
     query = {
@@ -217,3 +200,23 @@ async def get_merchant_orders(
     cursor = db.orders.find(query).sort("created_at", -1).skip(skip).limit(limit)
     orders = await cursor.to_list(length=limit)
     return orders
+
+@router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_order(
+    order_id: str,
+    current_user = Depends(get_current_user)
+):
+    # Only admins can delete orders
+    if current_user["role"] != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions"
+        )
+    order = await db.orders.find_one({"_id": str(order_id)})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    await db.orders.update_one(
+        {"_id": str(order_id)},
+        {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}}
+    )
+    return None

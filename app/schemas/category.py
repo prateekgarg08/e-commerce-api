@@ -19,8 +19,7 @@ class CategoryUpdate(BaseModel):
 class CategoryInDB(CategoryBase):
     id: str = Field(alias="_id")
     is_active: bool
-    created_at: datetime
-    updated_at: datetime
+    
 
 class Category(CategoryInDB):
     pass

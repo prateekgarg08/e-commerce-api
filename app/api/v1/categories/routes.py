@@ -10,7 +10,7 @@ from app.schemas.category import Category, CategoryCreate, CategoryUpdate, Categ
 
 router = APIRouter(tags=["categories"], prefix="/categories")
 
-@router.post("", response_model=Category)
+@router.post("", )
 async def create_category(
     category_data: CategoryCreate, 
     current_user = Depends(get_current_user)
@@ -39,10 +39,11 @@ async def create_category(
     
     result = await db.categories.insert_one(new_category)
     created_category = await db.categories.find_one({"_id": result.inserted_id})
+    created_category["_id"] = str(created_category["_id"])
     return created_category
 
 @router.get("", response_model=List[Category])
-async def list_categories():
+async def list_categories(current_user = Depends(get_current_user)):
     categories = await db.categories.find({"is_active": True}).to_list(1000)
 
     for category in categories:

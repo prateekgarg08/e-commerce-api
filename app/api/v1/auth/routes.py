@@ -12,7 +12,7 @@ from uuid import uuid4
 
 router = APIRouter(tags=["auth"], prefix="/auth")
 
-@router.post("/register", response_model=User)
+@router.post("/register")
 async def register(user_data: UserCreate):
     # Check if user already exists
     user = await db.users.find_one({"email": user_data.email})
@@ -35,9 +35,8 @@ async def register(user_data: UserCreate):
         "_id":str(uuid4())
     }
     
-    result = await db.users.insert_one(new_user)
-    created_user = await db.users.find_one({"_id": result.inserted_id})
-    return created_user
+    await db.users.insert_one(new_user)
+    return {"success":True}
 
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
