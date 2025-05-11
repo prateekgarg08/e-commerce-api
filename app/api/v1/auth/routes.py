@@ -32,7 +32,7 @@ async def register(user_data: UserCreate):
         "is_active": True,
         "created_at": datetime.utcnow(),  # Add created_at
         "updated_at": datetime.utcnow(), 
-        "_id":str(uuid4())
+        
     }
     
     await db.users.insert_one(new_user)

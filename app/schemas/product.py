@@ -7,12 +7,12 @@ class ProductBase(BaseModel):
     name: str
     description: str
     price: float
-    category_id: str
+    category_id: PyObjectId
     stock_quantity: int = 0
     images: List[str] = []
 
 class ProductCreate(ProductBase):
-    pass
+    category_id: str
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
@@ -24,11 +24,15 @@ class ProductUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 class ProductInDB(ProductBase):
-    id: str = Field(alias="_id")
-    merchant_id: str
+    id: PyObjectId = Field(alias="_id")
+    merchant_id: PyObjectId
     is_active: bool
     created_at: datetime
     updated_at: datetime
 
-class Product(ProductBase):
-    pass
+class ProductOut(ProductBase):
+    id: str = Field(alias="_id")
+    category_id: str
+    merchant_id: str
+    average_rating: Optional[float] = None
+    review_count: Optional[int] = None

@@ -1,14 +1,19 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field
-
+from app.db.database import PyObjectId
 class CategoryBase(BaseModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[str] = None
+    is_active: bool
 
-class CategoryCreate(CategoryBase):
-    pass
+
+class CategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parent_id: Optional[str] = None
+
 
 class CategoryUpdate(BaseModel):
     name: Optional[str] = None
@@ -17,12 +22,12 @@ class CategoryUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 class CategoryInDB(CategoryBase):
-    id: str = Field(alias="_id")
-    is_active: bool
+    id: PyObjectId = Field(alias="_id")
     
 
-class Category(CategoryInDB):
+class CategoryOut(CategoryBase):
+    id: str = Field(alias="_id")
     pass
 
-class CategoryTree(Category):
+class CategoryTree(CategoryOut):
     subcategories: List["CategoryTree"] = []

@@ -7,6 +7,9 @@ class OrderItemBase(BaseModel):
     quantity: int
     price: float
 
+class OrderItemOut(OrderItemBase):
+    product_name:str
+
 class OrderItemCreate(OrderItemBase):
     pass
 
@@ -30,9 +33,12 @@ class OrderUpdate(BaseModel):
 class OrderInDB(OrderBase):
     id: str = Field(alias="_id")
     user_id: str
+    merchant_id: str
     status: str
     created_at: datetime
     updated_at: datetime
 
 class Order(OrderInDB):
-    pass
+    items:List[OrderItemOut]
+    merchant_name:str
+    user_name:str

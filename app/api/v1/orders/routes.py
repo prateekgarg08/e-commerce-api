@@ -19,6 +19,7 @@ async def create_order(
     # Validate items and calculate total
     total_amount = 0
     items = []
+    merchant_ids = set()  # Track unique merchant IDs
     
     for item in order_data.items:
         # Check if product exists and is active
@@ -32,6 +33,8 @@ async def create_order(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Product {item.product_id} not found or inactive"
             )
+        
+        merchant_ids.add(str(product["merchant_id"]))  # Add merchant ID
         
         # Check if enough stock
         if product["stock_quantity"] < item.quantity:
@@ -47,7 +50,8 @@ async def create_order(
         items.append({
             "product_id": item.product_id,
             "quantity": item.quantity,
-            "price": product["price"]
+            "price": product["price"],
+            "merchant_id": str(product["merchant_id"])  # Add merchant ID to item
         })
         
         # Add to total
@@ -55,14 +59,20 @@ async def create_order(
         
         # Update product stock
         await db.products.update_one(
-            {"_id": item.product_id},
+            {"_id": ObjectId(item.product_id)},
             {"$inc": {"stock_quantity": -item.quantity}}
         )
     
+    if len(merchant_ids) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="All products in an order must be from the same merchant"
+        )
+
     # Create order
     new_order = {
-        "_id": str(uuid4()),
-        "user_id": str(current_user["_id"]),
+        "user_id": ObjectId(current_user["_id"]),
+        "merchant_id": ObjectId(list(merchant_ids)[0]),  # Set merchant ID
         "items": items,
         "total_amount": total_amount,
         "status": OrderStatus.PENDING,
@@ -74,9 +84,9 @@ async def create_order(
     
     result = await db.orders.insert_one(new_order)
     created_order = await db.orders.find_one({"_id": result.inserted_id})
-
-   
-
+    created_order["_id"] = str(created_order["_id"])
+    created_order["user_id"] = str(created_order["user_id"])
+    created_order["merchant_id"] = str(created_order["merchant_id"])
     return created_order
 
 @router.get("", response_model=List[Order])
@@ -88,13 +98,98 @@ async def list_orders(
 ):
     # Build query
     query = {}
-    
     if status:
         query["status"] = status
-    
-    # Execute query
-    cursor = db.orders.find(query).sort("created_at", -1).skip(skip).limit(limit)
+    if current_user["role"] == UserRole.USER:
+        query["user_id"] = ObjectId(current_user["_id"])
+    elif current_user["role"] == UserRole.MERCHANT:
+        merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
+        if not merchant:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Merchant profile not found"
+            )
+        query["merchant_id"] = ObjectId(merchant["_id"])
+    # Admin can see all orders (no filter needed)
+
+    pipeline = [
+        {"$match": query},
+        {"$sort": {"created_at": -1}},
+        {"$skip": skip},
+        {"$limit": limit},
+        {"$lookup": {
+            "from": "merchants",
+            "localField": "merchant_id",
+            "foreignField": "_id",
+            "as": "merchant_info"
+        }},
+        {"$unwind": {"path": "$merchant_info", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "users",
+            "localField": "user_id",
+            "foreignField": "_id",
+            "as": "user_info"
+        }},
+        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {"merchant_name": "$merchant_info.business_name", "user_name": "$user_info.full_name"}},
+        {"$lookup": {
+            "from": "products",
+            "let": {"items": "$items"},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$_id", {"$map": {"input": "$$items", "as": "i", "in": {"$toObjectId": "$$i.product_id"}}}]}}},
+                {"$project": {"_id": 1, "name": 1}}
+            ],
+            "as": "products_info"
+        }},
+        {"$addFields": {
+            "items": {
+                "$map": {
+                    "input": "$items",
+                    "as": "item",
+                    "in": {
+                        "$mergeObjects": [
+                            "$$item",
+                            {
+                                "product_name": {
+                                    "$ifNull": [
+                                        {
+                                            "$arrayElemAt": [
+                                                {
+                                                    "$map": {
+                                                        "input": {
+                                                            "$filter": {
+                                                                "input": "$products_info",
+                                                                "as": "prod",
+                                                                "cond": {"$eq": ["$$prod._id", {"$toObjectId": "$$item.product_id"}]}
+                                                            }
+                                                        },
+                                                        "as": "prod",
+                                                        "in": "$$prod.name"
+                                                    }
+                                                },
+                                                0
+                                            ]
+                                        },
+                                        ""
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }},
+        {"$project": {"merchant_info": 0, "products_info": 0, "user_info": 0}}
+    ]
+    cursor = db.orders.aggregate(pipeline)
     orders = await cursor.to_list(length=limit)
+    for order in orders:
+        order["_id"] = str(order["_id"])
+        order["user_id"] = str(order["user_id"])
+        order["merchant_id"] = str(order["merchant_id"])
+        for item in order.get("items", []):
+            if "product_id" in item:
+                item["product_id"] = str(item["product_id"])
     return orders
 
 @router.get("/{order_id}", response_model=Order)
@@ -102,36 +197,108 @@ async def get_order(
     order_id: str,
     current_user = Depends(get_current_user)
 ):
-    order = await db.orders.find_one({"_id": str(order_id)})
+    pipeline = [
+        {"$match": {"_id": ObjectId(order_id)}},
+        {"$lookup": {
+            "from": "merchants",
+            "localField": "merchant_id",
+            "foreignField": "_id",
+            "as": "merchant_info"
+        }},
+        {"$unwind": {"path": "$merchant_info", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "users",
+            "localField": "user_id",
+            "foreignField": "_id",
+            "as": "user_info"
+        }},
+        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {"merchant_name": "$merchant_info.business_name", "user_name": "$user_info.full_name"}},
+        {"$lookup": {
+            "from": "products",
+            "let": {"items": "$items"},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$_id", {"$map": {"input": "$$items", "as": "i", "in": {"$toObjectId": "$$i.product_id"}}}]}}},
+                {"$project": {"_id": 1, "name": 1}}
+            ],
+            "as": "products_info"
+        }},
+        {"$addFields": {
+            "items": {
+                "$map": {
+                    "input": "$items",
+                    "as": "item",
+                    "in": {
+                        "$mergeObjects": [
+                            "$$item",
+                            {
+                                "product_name": {
+                                    "$ifNull": [
+                                        {
+                                            "$arrayElemAt": [
+                                                {
+                                                    "$map": {
+                                                        "input": {
+                                                            "$filter": {
+                                                                "input": "$products_info",
+                                                                "as": "prod",
+                                                                "cond": {"$eq": ["$$prod._id", {"$toObjectId": "$$item.product_id"}]}
+                                                            }
+                                                        },
+                                                        "as": "prod",
+                                                        "in": "$$prod.name"
+                                                    }
+                                                },
+                                                0
+                                            ]
+                                        },
+                                        ""
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }},
+        {"$project": {"merchant_info": 0, "products_info": 0, "user_info": 0}}
+    ]
+    cursor = db.orders.aggregate(pipeline)
+    order = await cursor.to_list(length=1)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Check if user is the order owner or admin
-    if current_user["role"] != UserRole.ADMIN and str(order["user_id"]) != str(current_user["_id"]):
-        # Check if user is a merchant and has products in the order
+    order = order[0]
+    # Permission checks (same as before)
+    if current_user["role"] != UserRole.ADMIN and ((order["user_id"])) != (current_user["_id"]):
         if current_user["role"] == UserRole.MERCHANT:
-            merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+            merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
             if merchant:
-                # Get merchant products
                 merchant_products = await db.products.find(
                     {"merchant_id": merchant["_id"]}
                 ).to_list(1000)
                 merchant_product_ids = [str(p["_id"]) for p in merchant_products]
-                
-                # Check if any order item is from this merchant
                 has_merchant_items = any(
                     str(item["product_id"]) in merchant_product_ids
                     for item in order["items"]
                 )
-                
                 if has_merchant_items:
+                    order["_id"] = str(order["_id"])
+                    order["user_id"] = str(order["user_id"])
+                    order["merchant_id"] = str(order["merchant_id"])
+                    for item in order.get("items", []):
+                        if "product_id" in item:
+                            item["product_id"] = str(item["product_id"])
                     return order
-        
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions"
         )
-    
+    order["_id"] = str(order["_id"])
+    order["user_id"] = str(order["user_id"])
+    order["merchant_id"] = str(order["merchant_id"])
+    for item in order.get("items", []):
+        if "product_id" in item:
+            item["product_id"] = str(item["product_id"])
     return order
 
 @router.put("/{order_id}", response_model=Order)
@@ -141,7 +308,7 @@ async def update_order(
     current_user = Depends(get_current_user)
 ):
     # Get order
-    order = await db.orders.find_one({"_id": str(order_id)})
+    order = await db.orders.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
@@ -153,53 +320,88 @@ async def update_order(
     if update_data:
         update_data["updated_at"] = datetime.utcnow()
         await db.orders.update_one(
-            {"_id": str(order_id)},
+            {"_id": ObjectId(order_id)},
             {"$set": update_data}
         )
     
-    updated_order = await db.orders.find_one({"_id": str(order_id)})
+    pipeline = [
+        {"$match": {"_id": ObjectId(order_id)}},
+        {"$lookup": {
+            "from": "merchants",
+            "localField": "merchant_id",
+            "foreignField": "_id",
+            "as": "merchant_info"
+        }},
+        {"$unwind": {"path": "$merchant_info", "preserveNullAndEmptyArrays": True}},
+        {"$lookup": {
+            "from": "users",
+            "localField": "user_id",
+            "foreignField": "_id",
+            "as": "user_info"
+        }},
+        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+        {"$addFields": {"merchant_name": "$merchant_info.business_name", "user_name": "$user_info.full_name"}},
+        {"$lookup": {
+            "from": "products",
+            "let": {"items": "$items"},
+            "pipeline": [
+                {"$match": {"$expr": {"$in": ["$_id", {"$map": {"input": "$$items", "as": "i", "in": {"$toObjectId": "$$i.product_id"}}}]}}},
+                {"$project": {"_id": 1, "name": 1}}
+            ],
+            "as": "products_info"
+        }},
+        {"$addFields": {
+            "items": {
+                "$map": {
+                    "input": "$items",
+                    "as": "item",
+                    "in": {
+                        "$mergeObjects": [
+                            "$$item",
+                            {
+                                "product_name": {
+                                    "$ifNull": [
+                                        {
+                                            "$arrayElemAt": [
+                                                {
+                                                    "$map": {
+                                                        "input": {
+                                                            "$filter": {
+                                                                "input": "$products_info",
+                                                                "as": "prod",
+                                                                "cond": {"$eq": ["$$prod._id", {"$toObjectId": "$$item.product_id"}]}
+                                                            }
+                                                        },
+                                                        "as": "prod",
+                                                        "in": "$$prod.name"
+                                                    }
+                                                },
+                                                0
+                                            ]
+                                        },
+                                        ""
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }},
+        {"$project": {"merchant_info": 0, "products_info": 0, "user_info": 0}}
+    ]
+    cursor = db.orders.aggregate(pipeline)
+    updated_order = await cursor.to_list(length=1)
+    if not updated_order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    updated_order = updated_order[0]
+    updated_order["_id"] = str(updated_order["_id"])
+    updated_order["user_id"] = str(updated_order["user_id"])
+    updated_order["merchant_id"] = str(updated_order["merchant_id"])
+    for item in updated_order.get("items", []):
+        if "product_id" in item:
+            item["product_id"] = str(item["product_id"])
     return updated_order
-
-@router.get("/merchant/orders", response_model=List[Order])
-async def get_merchant_orders(
-    status: Optional[str] = None,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-    current_user = Depends(get_current_user)
-):
-    # Check if user is a merchant
-    if current_user["role"] != UserRole.MERCHANT:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only merchants can access this endpoint"
-        )
-    
-    # Get merchant profile
-    merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
-    if not merchant:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Merchant profile not found"
-        )
-    
-    # Get merchant products
-    merchant_products = await db.products.find(
-        {"merchant_id": merchant["_id"]}
-    ).to_list(1000)
-    merchant_product_ids = [str(p["_id"]) for p in merchant_products]
-    
-    # Build query for orders that contain merchant products
-    query = {
-        "items.product_id": {"$in": merchant_product_ids}
-    }
-    
-    if status:
-        query["status"] = status
-    
-    # Execute query
-    cursor = db.orders.find(query).sort("created_at", -1).skip(skip).limit(limit)
-    orders = await cursor.to_list(length=limit)
-    return orders
 
 @router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_order(
@@ -212,11 +414,44 @@ async def delete_order(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions"
         )
-    order = await db.orders.find_one({"_id": str(order_id)})
+    order = await db.orders.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     await db.orders.update_one(
-        {"_id": str(order_id)},
+        {"_id": ObjectId(order_id)},
         {"$set": {"is_active": False, "deleted_at": datetime.utcnow()}}
     )
     return None
+
+@router.patch("/{order_id}/cancel", response_model=Order)
+async def cancel_order(
+    order_id: str,
+    current_user = Depends(get_current_user)
+):
+    order = await db.orders.find_one({"_id": ObjectId(order_id)})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Only the order owner can cancel
+    if (order["user_id"]) != (current_user["_id"]):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to cancel this order."
+        )
+
+    # Only allow cancellation if order is in 'pending' state
+    if order["status"].lower() != "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Order can only be cancelled if it is in 'pending' state."
+        )
+
+    await db.orders.update_one(
+        {"_id": ObjectId(order_id)},
+        {"$set": {"status": "cancelled", "updated_at": datetime.utcnow()}}
+    )
+    updated_order = await db.orders.find_one({"_id": ObjectId(order_id)})
+    updated_order["_id"] = str(updated_order["_id"])
+    updated_order["user_id"] = str(updated_order["user_id"])
+    updated_order["merchant_id"] = str(updated_order["merchant_id"])
+    return updated_order

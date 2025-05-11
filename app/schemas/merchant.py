@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, EmailStr, Field
+from app.db.database import PyObjectId
+
 
 class MerchantBase(BaseModel):
     business_name: str
@@ -18,11 +20,13 @@ class MerchantUpdate(BaseModel):
     contact_phone: Optional[str] = None
 
 class MerchantInDB(MerchantBase):
-    id: str = Field(alias="_id")
-    user_id: str
+    id: PyObjectId = Field(alias="_id")
+    user_id: PyObjectId
     is_verified: bool
     created_at: datetime
     updated_at: datetime
 
-class Merchant(MerchantBase):
+
+class MerchantOut(MerchantBase):
+    id: str = Field(alias="_id")
     pass

@@ -6,11 +6,12 @@ from app.db.models import UserRole
 from app.core.security import get_current_user, get_password_hash
 from app.db.database import db
 from app.schemas.user import User, UserUpdate
-
+from bson import ObjectId
 router = APIRouter(tags=["users"], prefix="/users")
 
 @router.get("/me", )
 async def read_users_me(current_user = Depends(get_current_user)):
+    current_user["_id"] = str(current_user["_id"])
     return current_user
 
 @router.put("/me", )
@@ -23,11 +24,11 @@ async def update_user_me(user_update: UserUpdate, current_user = Depends(get_cur
     if user_data:
         user_data["updated_at"] = datetime.utcnow()
         await db.users.update_one(
-            {"_id": str(current_user["_id"])},
+            {"_id": ObjectId(current_user["_id"])},
             {"$set": user_data}
         )
     
-    updated_user = await db.users.find_one({"_id": str(current_user["_id"])})
+    updated_user = await db.users.find_one({"_id": ObjectId(current_user["_id"])})
     return updated_user
 
 @router.get("/{user_id}", )

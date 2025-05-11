@@ -7,7 +7,7 @@ from bson import ObjectId
 from app.core.security import get_current_user
 from app.db.database import db
 from app.db.models import UserRole
-from app.schemas.product import Product, ProductCreate, ProductUpdate
+from app.schemas.product import ProductOut, ProductCreate, ProductUpdate
 import json
 from fastapi.encoders import jsonable_encoder
 router = APIRouter(tags=["products"], prefix="/products")
@@ -18,8 +18,9 @@ from PIL import Image
 import io
 import requests
 from fastapi.logger import logger
+from app.libs.chromadb import collection
 
-@router.post("", response_model=Product)
+@router.post("", response_model=ProductOut)
 async def create_product(
     product_data: ProductCreate,
     current_user = Depends(get_current_user)
@@ -32,11 +33,18 @@ async def create_product(
         )
     
     # Get merchant profile
-    merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+    merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
     if not merchant:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Merchant profile not found"
+        )
+    
+    # Check if merchant is verified
+    if not merchant.get("is_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your merchant account is pending verification. You cannot create products until your account is verified."
         )
     
     # Check if category exists
@@ -50,7 +58,7 @@ async def create_product(
     # Create new product
     new_product = product_data.dict()
     new_product["merchant_id"] = merchant["_id"]
-    new_product["category_id"] = str(new_product["category_id"])
+    new_product["category_id"] = ObjectId(new_product["category_id"])
     new_product["is_active"] = True
 
     
@@ -65,6 +73,9 @@ async def create_product(
         "_id":str(result.inserted_id)
     }
     add_image(str(result.inserted_id),image,metadata)
+    created_product["_id"] = str(created_product["_id"])
+    created_product["category_id"] = str(created_product["category_id"])
+    created_product["merchant_id"] = str(created_product["merchant_id"])
     return created_product
 
 @router.get("", response_model=List)
@@ -81,10 +92,10 @@ async def list_products(
     query = {"is_active": True}
     
     if category_id:
-        query["category_id"] = str(category_id)
+        query["category_id"] = ObjectId(category_id)
     
     if merchant_id:
-        query["merchant_id"] = str(merchant_id)
+        query["merchant_id"] = ObjectId(merchant_id)
     
     if search:
         query["$or"] = [
@@ -113,6 +124,27 @@ async def list_products(
         if "merchant_id" in product:
             product["merchant_id"] = str(product["merchant_id"])
 
+        # --- Add average_rating and review_count ---
+        try:
+            review_agg = await db.reviews.aggregate([
+                {"$match": {"product_id": ObjectId(product["_id"])}},
+                {"$group": {
+                    "_id": "$product_id",
+                    "average_rating": {"$avg": "$rating"},
+                    "review_count": {"$sum": 1}
+                }}
+            ]).to_list(length=1)
+            if review_agg and isinstance(review_agg[0], dict):
+                avg = review_agg[0].get("average_rating")
+                product["average_rating"] = round(avg, 2) if avg is not None else None
+                product["review_count"] = review_agg[0].get("review_count", 0)
+            else:
+                product["average_rating"] = None
+                product["review_count"] = 0
+        except Exception as e:
+            product["average_rating"] = None
+            product["review_count"] = 0
+
     print("got ressults")
     return ORJSONResponse(products) 
 
@@ -133,6 +165,26 @@ async def get_product(product_id: str):
         sku["category_id"] = str(sku["category_id"])
     product["related_products"] = related_products[1:5]
 
+    # Add average_rating and review_count
+    try:
+        review_agg = await db.reviews.aggregate([
+            {"$match": {"product_id": ObjectId(product["_id"])}},
+            {"$group": {
+                "_id": "$product_id",
+                "average_rating": {"$avg": "$rating"},
+                "review_count": {"$sum": 1}
+            }}
+        ]).to_list(length=1)
+        if review_agg and isinstance(review_agg[0], dict):
+            avg = review_agg[0].get("average_rating")
+            product["average_rating"] = round(avg, 2) if avg is not None else None
+            product["review_count"] = review_agg[0].get("review_count", 0)
+        else:
+            product["average_rating"] = None
+            product["review_count"] = 0
+    except Exception as e:
+        product["average_rating"] = None
+        product["review_count"] = 0
 
     if "_id" in product:
         product["_id"] = str(product["_id"])
@@ -143,20 +195,20 @@ async def get_product(product_id: str):
 
     return product
 
-@router.put("/{product_id}", response_model=Product)
+@router.put("/{product_id}", response_model=ProductOut)
 async def update_product(
     product_id: str,
     product_update: ProductUpdate,
     current_user = Depends(get_current_user)
 ):
     # Get product
-    product = await db.products.find_one({"_id": str(product_id)})
+    product = await db.products.find_one({"_id": ObjectId(product_id)})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
     # Check if user is the product owner or admin
     if current_user["role"] != UserRole.ADMIN:
-        merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+        merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
         if not merchant or str(merchant["_id"]) != str(product["merchant_id"]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -178,11 +230,12 @@ async def update_product(
     if update_data:
         update_data["updated_at"] = datetime.utcnow()
         await db.products.update_one(
-            {"_id": str(product_id)},
+            {"_id": ObjectId(product_id)},
             {"$set": update_data}
         )
     
-    updated_product = await db.products.find_one({"_id": str(product_id)})
+    updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
+    updated_product["_id"] = str(updated_product["_id"])
     return updated_product
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -191,13 +244,13 @@ async def delete_product(
     current_user = Depends(get_current_user)
 ):
     # Get product
-    product = await db.products.find_one({"_id": str(product_id)})
+    product = await db.products.find_one({"_id": ObjectId(product_id)})
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     
     # Check if user is the product owner or admin
     if current_user["role"] != UserRole.ADMIN:
-        merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+        merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
         if not merchant or str(merchant["_id"]) != str(product["merchant_id"]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -205,8 +258,9 @@ async def delete_product(
             )
     
     # Soft delete (set is_active to False)
+    collection.delete(ids=[product_id])
     await db.products.update_one(
-        {"_id": str(product_id)},
+        {"_id": ObjectId(product_id)},
         {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
     )
     
@@ -224,7 +278,7 @@ async def get_merchant_inventory(
         )
     
     # Get merchant profile
-    merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+    merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
     if not merchant:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -236,6 +290,7 @@ async def get_merchant_inventory(
     for product in products:
         product["_id"] = str(product["_id"])
         product["merchant_id"] = str(product["merchant_id"])
+        product["category_id"] = str(product["category_id"])
     return products
 
 @router.post("/search/image")

@@ -5,8 +5,8 @@ from datetime import datetime
 from app.core.security import get_current_user
 from app.db.database import db
 from app.db.models import UserRole
-from app.schemas.merchant import Merchant, MerchantCreate, MerchantUpdate
-
+from app.schemas.merchant import MerchantOut, MerchantCreate, MerchantUpdate
+from bson import ObjectId
 router = APIRouter(tags=["merchants"], prefix="/merchants")
 
 def to_str_id(merchant):
@@ -25,7 +25,7 @@ async def create_merchant(
     current_user = Depends(get_current_user)
 ):
     # Check if user already has a merchant account
-    existing = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+    existing = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -34,14 +34,14 @@ async def create_merchant(
     
     # Create new merchant
     new_merchant = merchant_data.dict()
-    new_merchant["user_id"] = str(current_user["_id"])
+    new_merchant["user_id"] = ObjectId(current_user["_id"])
     new_merchant["is_verified"] = False
     
     result = await db.merchants.insert_one(new_merchant)
     
     # Update user role to merchant
     await db.users.update_one(
-        {"_id": str(current_user["_id"])},
+        {"_id": ObjectId(current_user["_id"])},
         {"$set": {"role": UserRole.MERCHANT}}
     )
     
@@ -56,7 +56,7 @@ async def get_merchant_profile(current_user = Depends(get_current_user)):
             detail="Not a merchant account"
         )
     
-    merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+    merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant profile not found")
     
@@ -73,7 +73,7 @@ async def update_merchant_profile(
             detail="Not a merchant account"
         )
     
-    merchant = await db.merchants.find_one({"user_id": str(current_user["_id"])})
+    merchant = await db.merchants.find_one({"user_id": ObjectId(current_user["_id"])})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant profile not found")
     
@@ -95,10 +95,34 @@ async def list_merchants():
 
 @router.get("/{merchant_id}")
 async def get_merchant(merchant_id: str):
-    merchant = await db.merchants.find_one({"_id": str(merchant_id)})
+    merchant = await db.merchants.find_one({"_id": ObjectId(merchant_id)})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
     return to_str_id(merchant)
+
+@router.put("/{merchant_id}/verify")
+async def verify_merchant(
+    merchant_id: str,
+    current_user = Depends(get_current_user)
+):
+    # Only admins can verify merchants
+    if current_user["role"] != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators can verify merchants"
+        )
+    
+    merchant = await db.merchants.find_one({"_id": ObjectId(merchant_id)})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    
+    await db.merchants.update_one(
+        {"_id": ObjectId(merchant_id)},
+        {"$set": {"is_verified": True, "verified_at": datetime.utcnow()}}
+    )
+    
+    updated_merchant = await db.merchants.find_one({"_id": ObjectId(merchant_id)})
+    return to_str_id(updated_merchant)
 
 @router.delete("/{merchant_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_merchant(
@@ -111,11 +135,11 @@ async def delete_merchant(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions"
         )
-    merchant = await db.merchants.find_one({"_id": str(merchant_id)})
+    merchant = await db.merchants.find_one({"_id": ObjectId(merchant_id)})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
     await db.merchants.update_one(
-        {"_id": str(merchant_id)},
+        {"_id": ObjectId(merchant_id)},
         {"$set": {"is_verified": False, "deleted_at": datetime.utcnow()}}
     )
     return None

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, HTTPException, UploadFile,status
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import auth, users, merchants, products, categories, orders
+from app.api.v1 import auth, users, merchants, products, categories, orders, livekit
 from app.core.config import settings
 from app.libs.cloudinary import upload_image 
 # from app.libs.chromadb import collection
@@ -27,8 +27,8 @@ app.include_router(merchants.router, prefix=settings.API_V1_STR)
 app.include_router(products.router, prefix=settings.API_V1_STR)
 app.include_router(categories.router, prefix=settings.API_V1_STR)
 app.include_router(orders.router, prefix=settings.API_V1_STR)
-
-
+app.include_router(orders.razorpay_routers, prefix=settings.API_V1_STR)
+app.include_router(livekit.router, prefix=settings.API_V1_STR)
 @app.post("/upload")
 async def handle_upload(image: UploadFile=File(...)):
     try:
