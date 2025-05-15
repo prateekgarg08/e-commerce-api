@@ -9,3 +9,6 @@ wheels/
 embeddings/
 # Virtual environments
 .venv
+
+.env/
+embeddings

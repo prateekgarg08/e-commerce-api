@@ -29,6 +29,7 @@ async def update_user_me(user_update: UserUpdate, current_user = Depends(get_cur
         )
     
     updated_user = await db.users.find_one({"_id": ObjectId(current_user["_id"])})
+    updated_user["_id"] = str(updated_user["_id"])
     return updated_user
 
 @router.get("/{user_id}", )

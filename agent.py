@@ -51,9 +51,34 @@ class Assistant(Agent):
         except Exception:
             raise ToolError("Unable to navigate to page")
 
+    @function_tool()
+    async def search_product(
+        context: RunContext,
+        product_name: str
+    ):
+        """Search for a product.
+
+        Args:
+            product_name: The name of the product to search for
+
+        """
+        try:
+            room = get_job_context().room
+            participant_identity = next(iter(room.remote_participants))
+            response = await room.local_participant.perform_rpc(
+                destination_identity=participant_identity,
+                method="search_product",
+                payload=json.dumps({
+                    "product_name": product_name
+                }),
+                response_timeout=10.0,
+            )
+            return response
+        except Exception:
+            raise ToolError("Unable to search for product")
 
     def __init__(self) -> None:
-        super().__init__(instructions="You are a helpful voice AI assistant.")
+        super().__init__(instructions="You are a helpful voice AI assistant. You can help the user to navigate to different pages of the website. You can also help the user to search for products. ")
 
 
 async def entrypoint(ctx: agents.JobContext):

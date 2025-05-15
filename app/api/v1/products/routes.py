@@ -12,13 +12,13 @@ import json
 from fastapi.encoders import jsonable_encoder
 router = APIRouter(tags=["products"], prefix="/products")
 from fastapi.responses import ORJSONResponse
-from app.libs.chromadb import add_image,search_image, embedding_function
+from app.libs.chromadb import add_image,search_image, embedding_function, collection
 import numpy as np
 from PIL import Image
 import io
 import requests
 from fastapi.logger import logger
-from app.libs.chromadb import collection
+from app.libs.category_utils import get_descendant_category_ids
 
 @router.post("", response_model=ProductOut)
 async def create_product(
@@ -88,21 +88,39 @@ async def list_products(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100)
 ):
-    # Build query
     query = {"is_active": True}
-    
+
     if category_id:
-        query["category_id"] = ObjectId(category_id)
-    
+        # Get all descendant category IDs (including the selected one)
+        category_ids = await get_descendant_category_ids(category_id, db)
+        query["category_id"] = {"$in": category_ids}
+
     if merchant_id:
         query["merchant_id"] = ObjectId(merchant_id)
-    
+
+    # --- Semantic Search with ChromaDB ---
     if search:
+        # 1. Semantic search with ChromaDB
+        search_emb = embedding_function([search])[0]
+        result = collection.query(query_embeddings=[search_emb], n_results=limit)
+        chromadb_ids = [ObjectId(_id) for _id in result["ids"][0]]
+
+        # query["_id"] = {"$in": chromadb_ids}
+        # 2. Keyword search filter
+        keyword_filter = {
+            "$or": [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"description": {"$regex": search, "$options": "i"}}
+            ]
+        }
+
+        # 3. Combine both filters: match either ChromaDB or keyword
         query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"description": {"$regex": search, "$options": "i"}}
+            {"_id": {"$in": chromadb_ids}},
+            keyword_filter["$or"][0],
+            keyword_filter["$or"][1]
         ]
-    
+
     # Price filter
     if min_price is not None or max_price is not None:
         price_query = {}
@@ -146,6 +164,18 @@ async def list_products(
             product["review_count"] = 0
 
     print("got ressults")
+
+    # After fetching products:
+    if search and products:
+        # Create a mapping from id to product
+        product_map = {str(product["_id"]): product for product in products}
+        # First, add products in chromadb_ids order
+        ordered_products = [product_map[str(_id)] for _id in chromadb_ids if str(_id) in product_map]
+        # Then, add the rest (keyword-only matches)
+        chromadb_id_set = set(str(_id) for _id in chromadb_ids)
+        ordered_products += [product for product in products if str(product["_id"]) not in chromadb_id_set]
+        products = ordered_products
+
     return ORJSONResponse(products) 
 
 @router.get("/{product_id}")
@@ -219,7 +249,7 @@ async def update_product(
     update_data = {k: v for k, v in product_update.dict(exclude_unset=True).items()}
     if "category_id" in update_data:
         # Check if category exists
-        category = await db.categories.find_one({"_id": str(update_data["category_id"])})
+        category = await db.categories.find_one({"_id": ObjectId(update_data["category_id"])})
         if not category:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -236,6 +266,8 @@ async def update_product(
     
     updated_product = await db.products.find_one({"_id": ObjectId(product_id)})
     updated_product["_id"] = str(updated_product["_id"])
+    updated_product["category_id"] = str(updated_product["category_id"])
+    updated_product["merchant_id"] = str(updated_product["merchant_id"])
     return updated_product
 
 @router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -320,7 +352,7 @@ async def get_search_by_image(image: UploadFile):
     best_category_id = category_ids[best_idx]
 
     # 4. Return all products in that category
-    products = await db.products.find({"category_id": str(best_category_id), "is_active": True}).to_list(1000)
+    products = await db.products.find({"category_id": ObjectId(best_category_id), "is_active": True}).to_list(1000)
     for product in products:
         if "_id" in product:
             product["_id"] = str(product["_id"])
